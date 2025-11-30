@@ -1,99 +1,24 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Delta Spike Detector</title>
+  <title>Institutional Delta Spike Map</title>
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+
   <style>
-    body {
-      background: #0e1626;
-      color: white;
-      font-family: Arial;
-      padding: 20px;
-    }
-    select, input, button {
-      width: 100%;
-      padding: 10px;
-      margin: 8px 0;
-      border-radius: 6px;
-      border: none;
-      background: #1b263b;
-      color: white;
-    }
-    button {
-      background: #3b82f6;
-      font-size: 16px;
-      cursor: pointer;
-    }
-    .zone {
-      background: #162032;
-      padding: 10px;
-      border-radius: 6px;
-      margin-top: 8px;
-    }
+    body { background:#0b0f16; color:white; font-family:sans-serif; }
+    #chart { height: 600px; }
   </style>
 </head>
-
 <body>
-  <h2>Delta Spike Support / Resistance</h2>
 
-  <label>Symbol</label>
-  <select id="symbol">
-    <option value="BTCUSDT">BTCUSDT</option>
-    <option value="ETHUSDT">ETHUSDT</option>
-    <option value="BNBUSDT">BNBUSDT</option>
-    <option value="SOLUSDT">SOLUSDT</option>
-  </select>
+<h2>Institutional Delta Spike Map (3 Months)</h2>
+<button onclick="loadData()">Load Zones</button>
 
-  <label>Interval</label>
-  <select id="interval">
-    <option value="1m">1m</option>
-    <option value="5m">5m</option>
-    <option value="15m">15m</option>
-    <option value="1h" selected>1h</option>
-    <option value="4h">4h</option>
-  </select>
+<div id="chart"></div>
 
-  <label>Delta Threshold</label>
-  <input type="number" id="threshold" step="0.1" value="1">
+<pre id="zones"></pre>
 
-  <button onclick="fetchZones()">Fetch Delta Zones</button>
+<script src="chart.js"></script>
 
-  <h3>Detected Spike Levels</h3>
-  <div id="result"></div>
-
-  <script>
-    async function fetchZones() {
-      const symbol = document.getElementById("symbol").value;
-      const interval = document.getElementById("interval").value;
-      const threshold = document.getElementById("threshold").value;
-
-      const out = document.getElementById("result");
-      out.innerHTML = "Loading...";
-
-      try {
-        const r = await fetch(`/api/zones?symbol=${symbol}&interval=${interval}&threshold=${threshold}`);
-        const j = await r.json();
-
-        if (!j.zones.length) {
-          out.innerHTML = "<p>No delta spike zones found.</p>";
-          return;
-        }
-
-        let html = "";
-        j.zones.forEach(z => {
-          html += `
-            <div class="zone">
-              <b>Price:</b> ${z.price}<br>
-              <b>Delta:</b> ${z.delta}<br>
-              <b>Time:</b> ${new Date(z.time).toLocaleString()}
-            </div>
-          `;
-        });
-
-        out.innerHTML = html;
-      } catch (err) {
-        out.innerHTML = "Error: " + err.message;
-      }
-    }
-  </script>
 </body>
 </html>
