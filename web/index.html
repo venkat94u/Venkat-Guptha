@@ -1,31 +1,125 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-  <title>Delta Spike Levels (3 Months)</title>
+  <meta charset="utf-8" />
+  <title>Delta Spike S/R (Binance, 5m, 3 months)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial; background:#071229;color:#e6eef7;padding:18px}
+    .wrap{max-width:1000px;margin:0 auto}
+    h1{margin:0 0 12px}
+    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    input,select,button{padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.06);background:#0e2b42;color:#e6eef7}
+    button{background:#1f6fff;border:none;color:white;cursor:pointer}
+    .grid{display:flex;gap:16px;margin-top:18px}
+    .panel{flex:1;background:#0f2432;padding:12px;border-radius:8px;min-height:220px}
+    .zone{display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid rgba(255,255,255,0.03)}
+    .muted{color:#9fb0c8;font-size:13px}
+    .small{font-size:13px;color:#9fb0c8}
+    .status{margin-top:8px;color:#b5f7c1}
+  </style>
 </head>
 <body>
+<div class="wrap">
+  <h1>Delta Spike S/R — Fast (Binance, 5m, 3 months)</h1>
 
-<h2>Delta Spike Levels (3 Months)</h2>
-<button onclick="fetchZones()">Fetch Zones</button>
+  <div class="controls">
+    <label>Symbol: <input id="symbol" value="BTCUSDT" style="width:140px"/></label>
+    <label>Months: 
+      <select id="months">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3" selected>3</option>
+      </select>
+    </label>
+    <label>Max distance (pts): <input id="maxDistance" value="300" style="width:80px" /></label>
+    <label>Min separation (pts): <input id="minSep" value="50" style="width:80px" /></label>
+    <label>Levels: <input id="levels" value="20" style="width:80px"/></label>
+    <button id="fetchBtn">Fetch S/R</button>
+    <div id="status" class="small" style="margin-left:12px"></div>
+  </div>
 
-<h3>Above Current Price</h3>
-<pre id="above"></pre>
+  <div class="grid">
+    <div class="panel" id="left">
+      <div class="small muted">Above current price</div>
+      <div id="aboveList"></div>
+    </div>
 
-<h3>Below Current Price</h3>
-<pre id="below"></pre>
+    <div class="panel" id="right">
+      <div class="small muted">Below current price</div>
+      <div id="belowList"></div>
+    </div>
+  </div>
+</div>
 
 <script>
-async function fetchZones() {
-  const res = await fetch("/api/zones?symbol=BTCUSDT");
-  const data = await res.json();
+  function el(id){return document.getElementById(id);}
+  function setStatus(msg, ok=true){ el('status').textContent = msg; el('status').style.color = ok ? '#b5f7c1' : '#ffb3b3'; }
 
-  document.getElementById("above").textContent =
-    JSON.stringify(data.above, null, 2);
+  async function fetchZones(){
+    const symbol = (el('symbol').value || 'BTCUSDT').toUpperCase();
+    const months = el('months').value || '3';
+    const maxDistance = el('maxDistance').value || '300';
+    const minSep = el('minSep').value || '50';
+    const levels = el('levels').value || '20';
 
-  document.getElementById("below").textContent =
-    JSON.stringify(data.below, null, 2);
-}
+    setStatus('Fetching...');
+
+    try {
+      const q = new URLSearchParams({
+        symbol,
+        periodMonths: months,
+        interval: '5m',
+        maxDistance,
+        minSeparation: minSep,
+        maxLevels: levels
+      });
+
+      const r = await fetch('/api/zones?' + q.toString(), { cache: 'no-store' });
+      if (!r.ok) {
+        const txt = await r.text();
+        setStatus('Error: ' + r.status + ' ' + txt, false);
+        return;
+      }
+      const j = await r.json();
+      if (!j.ok) {
+        setStatus('Error: ' + (j.error || 'unknown'), false);
+        return;
+      }
+
+      setStatus(`Symbol ${j.symbol} — current price ${j.currentPrice}`, true);
+
+      renderList('aboveList', j.above);
+      renderList('belowList', j.below);
+    } catch (e) {
+      console.error(e);
+      setStatus('Fetch failed: ' + e.message, false);
+    }
+  }
+
+  function renderList(containerId, arr){
+    const c = el(containerId);
+    if (!arr || !arr.length) {
+      c.innerHTML = '<div class="muted" style="padding:8px">No zones found</div>';
+      return;
+    }
+    c.innerHTML = arr.map(z => `
+      <div class="zone">
+        <div><strong>${z.price}</strong><div class="muted small">time ${new Date(z.time).toLocaleString()}</div></div>
+        <div style="text-align:right">
+          <div style="font-weight:600">${Number(z.volume).toFixed(3)}</div>
+          <div class="muted small">delta ${Number(z.deltaVol||0).toFixed(2)}</div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  el('fetchBtn').addEventListener('click', fetchZones);
+
+  // auto fetch on load
+  window.addEventListener('load', ()=> {
+    setTimeout(fetchZones, 200);
+  });
 </script>
-
 </body>
 </html>
