@@ -5,6 +5,9 @@ import cors from "cors";
 const app = express();
 app.use(cors());
 
+// ✅ Serve frontend (VERY IMPORTANT)
+app.use(express.static("web"));
+
 const PORT = process.env.PORT || 3000;
 
 // ----------------------------
@@ -23,6 +26,7 @@ async function fetch3MonthsKlines(symbol, interval = "1m") {
       `?symbol=${symbol}&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=${limit}`;
 
     const { data } = await axios.get(url);
+
     if (data.length === 0) break;
 
     for (let c of data) {
@@ -35,17 +39,18 @@ async function fetch3MonthsKlines(symbol, interval = "1m") {
       });
     }
 
-    endTime = data[0][0]; // move backwards
+    endTime = data[0][0]; // shift window backwards
+
     if (endTime <= startTime) break;
 
-    if (all.length > 150000) break; // safety cap
+    if (all.length > 150000) break; // safety limit
   }
 
   return all.reverse();
 }
 
 // ----------------------------
-// Extract Strong DELTA SPIKES
+// Extract Strong Delta Zones
 // ----------------------------
 function extractStrongDeltaZones(candles, currentPrice) {
   let spikes = [];
@@ -56,7 +61,7 @@ function extractStrongDeltaZones(candles, currentPrice) {
 
     const delta = Math.abs(cur.close - prev.close);
 
-    if (delta < 5) continue; // minimum threshold
+    if (delta < 5) continue; // ignore small moves
 
     spikes.push({
       price: cur.close,
@@ -68,7 +73,7 @@ function extractStrongDeltaZones(candles, currentPrice) {
 
   if (spikes.length === 0) return { above: [], below: [] };
 
-  // keep only strongest 2%
+  // strongest 2%
   const sorted = spikes.sort((a, b) => b.delta - a.delta);
   const top = sorted.slice(0, Math.floor(sorted.length * 0.02));
 
@@ -95,12 +100,8 @@ function extractStrongDeltaZones(candles, currentPrice) {
 }
 
 // ----------------------------
-// API endpoint
+// API endpoint (frontend auto-served)
 // ----------------------------
-app.get("/", (req, res) => {
-  res.send("Hybrid Delta Spike Detector Running");
-});
-
 app.get("/api/zones", async (req, res) => {
   try {
     const symbol = (req.query.symbol || "BTCUSDT").toUpperCase();
@@ -126,4 +127,5 @@ app.get("/api/zones", async (req, res) => {
   }
 });
 
+// ----------------------------
 app.listen(PORT, () => console.log("Server running on port " + PORT));
