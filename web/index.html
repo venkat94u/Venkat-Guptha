@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Volume Clusters MVP — Mobile</title>
+  <style>
+    body{font-family:Inter,Arial,Helvetica;background:#071226;color:#e6f0fb;margin:0;padding:12px}
+    .wrap{max-width:980px;margin:0 auto}
+    h1{font-size:18px;margin:4px 0 8px}
+    label{font-size:13px;color:#9fb0c8}
+    select,input{padding:8px;border-radius:8px;border:0;background:#081726;color:#e6f0fb;margin-right:6px}
+    button{padding:8px;border-radius:8px;border:0;background:#0f6cff;color:white;cursor:pointer}
+    .card{background:#0f2030;padding:10px;border-radius:10px;margin-top:10px}
+    .cluster{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03)}
+    .muted{color:#9fb0c8;font-size:12px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Volume Clusters — MVP (Mobile)</h1>
+  <div class="card">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div>
+        <label>Exchange</label><br>
+        <select id="exchange">
+          <option value="binance">Binance</option>
+          <option value="okx">OKX</option>
+          <option value="bybit">Bybit</option>
+        </select>
+      </div>
+      <div>
+        <label>Symbol</label><br>
+        <input id="symbol" value="BTCUSDT" />
+      </div>
+      <div style="align-self:end">
+        <button id="fetchBtn">Fetch Top Clusters</button>
+      </div>
+    </div>
+    <div id="clusters" style="margin-top:10px"></div>
+  </div>
+</div>
+<script>
+  const fetchBtn = document.getElementById('fetchBtn');
+  const clustersEl = document.getElementById('clusters');
+  fetchBtn.addEventListener('click', async ()=>{
+    clustersEl.innerHTML = '<div class="muted">loading…</div>';
+    const exchange = document.getElementById('exchange').value;
+    const symbol = document.getElementById('symbol').value.trim();
+    const res = await fetch(`/api/top-clusters?symbol=${symbol}&exchange=${exchange}&limit=50&periodMs=${24*3600*1000}&bucket=1`);
+    const j = await res.json();
+    if(!j.clusters || !j.clusters.length){
+      clustersEl.innerHTML = '<div class="muted">no clusters (run backfill first)</div>';
+      return;
+    }
+    clustersEl.innerHTML = j.clusters.map(c=>`
+      <div class="cluster">
+        <div><strong>${c.price}</strong> — vol ${c.volume.toFixed(4)}</div>
+        <div class="muted">last @ ${new Date(c.lastTs).toLocaleString()}</div>
+      </div>
+    `).join('');
+  });
+</script>
+</body>
+</html>
