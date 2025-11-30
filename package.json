@@ -1,7 +1,6 @@
 {
-  "name": "hybrid-delta-spike",
+  "name": "delta-spike-sr",
   "version": "1.0.0",
-  "type": "module",
   "scripts": {
     "start": "node server/index.js"
   },
