@@ -3,16 +3,14 @@ import axios from "axios";
 import cors from "cors";
 
 const app = express();
-app.use(cors());
-
-// ✅ Serve frontend (VERY IMPORTANT)
-app.use(express.static("web"));
-
 const PORT = process.env.PORT || 3000;
 
-// ----------------------------
-// Fetch 3 months klines
-// ----------------------------
+app.use(cors());
+app.use(express.static("web"));   // serve frontend
+
+// ---------------------------------------------------------
+// Fetch 3 months of 1m candles with timeout + safety
+// ---------------------------------------------------------
 async function fetch3MonthsKlines(symbol, interval = "1m") {
   let all = [];
   let limit = 1000;
@@ -25,7 +23,15 @@ async function fetch3MonthsKlines(symbol, interval = "1m") {
       `https://api.binance.com/api/v3/klines` +
       `?symbol=${symbol}&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=${limit}`;
 
-    const { data } = await axios.get(url);
+    let data = [];
+
+    try {
+      const res = await axios.get(url, { timeout: 5000 });
+      data = res.data;
+    } catch (err) {
+      console.log("❌ Binance timeout or rate limit → stopping early");
+      break;
+    }
 
     if (data.length === 0) break;
 
@@ -39,19 +45,17 @@ async function fetch3MonthsKlines(symbol, interval = "1m") {
       });
     }
 
-    endTime = data[0][0]; // shift window backwards
-
+    endTime = data[0][0]; // move backward
     if (endTime <= startTime) break;
-
     if (all.length > 150000) break; // safety limit
   }
 
   return all.reverse();
 }
 
-// ----------------------------
-// Extract Strong Delta Zones
-// ----------------------------
+// ---------------------------------------------------------
+// Extract strongest Delta Spike S/R Zones
+// ---------------------------------------------------------
 function extractStrongDeltaZones(candles, currentPrice) {
   let spikes = [];
 
@@ -60,8 +64,7 @@ function extractStrongDeltaZones(candles, currentPrice) {
     const cur = candles[i];
 
     const delta = Math.abs(cur.close - prev.close);
-
-    if (delta < 5) continue; // ignore small moves
+    if (delta < 5) continue;  // minimum spike threshold
 
     spikes.push({
       price: cur.close,
@@ -77,7 +80,7 @@ function extractStrongDeltaZones(candles, currentPrice) {
   const sorted = spikes.sort((a, b) => b.delta - a.delta);
   const top = sorted.slice(0, Math.floor(sorted.length * 0.02));
 
-  // remove levels too close (< 50 points)
+  // remove levels < 50 points apart
   const clean = [];
   for (let z of top) {
     if (!clean.some(c => Math.abs(c.price - z.price) < 50)) {
@@ -85,12 +88,13 @@ function extractStrongDeltaZones(candles, currentPrice) {
     }
   }
 
-  // split above/below
+  // closest ABOVE
   const above = clean
     .filter(z => z.price > currentPrice)
     .sort((a, b) => a.distance - b.distance)
     .slice(0, 30);
 
+  // closest BELOW
   const below = clean
     .filter(z => z.price < currentPrice)
     .sort((a, b) => a.distance - b.distance)
@@ -99,19 +103,26 @@ function extractStrongDeltaZones(candles, currentPrice) {
   return { above, below };
 }
 
-// ----------------------------
-// API endpoint (frontend auto-served)
-// ----------------------------
+// ---------------------------------------------------------
+// Routes
+// ---------------------------------------------------------
+app.get("/", (req, res) => {
+  res.send("Hybrid Delta Spike Detector Running");
+});
+
+// S/R zones endpoint
 app.get("/api/zones", async (req, res) => {
   try {
     const symbol = (req.query.symbol || "BTCUSDT").toUpperCase();
 
+    // current price
     const priceRes = await axios.get(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
+      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
+      { timeout: 4000 }
     );
-
     const currentPrice = Number(priceRes.data.price);
 
+    // historical candles
     const candles = await fetch3MonthsKlines(symbol);
 
     const zones = extractStrongDeltaZones(candles, currentPrice);
@@ -122,10 +133,12 @@ app.get("/api/zones", async (req, res) => {
       above: zones.above,
       below: zones.below
     });
+
   } catch (err) {
+    console.log("❌ Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ----------------------------
+// ---------------------------------------------------------
 app.listen(PORT, () => console.log("Server running on port " + PORT));
