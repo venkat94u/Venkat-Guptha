@@ -1,30 +1,99 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Delta Spike — Support/Resistance (Binance only)</title>
-<style>
-:root{--bg:#071226;--card:#0f2030;--accent:#0f6cff;--muted:#9fb0c8;color:#e6f0fb}
-body{font-family:Inter,Arial,Helvetica;background:var(--bg);color:var(--muted);margin:0;padding:18px}
-.wrap{max-width:1100px;margin:0 auto}
-h1{color:#fff;font-size:18px;margin:0 0 12px}
-label{font-size:13px;color:var(--muted)}
-input,button,select{padding:8px;border-radius:8px;border:0;background:#081726;color:var(--muted);margin-right:6px}
-button{background:var(--accent);color:white;cursor:pointer}
-.card{background:var(--card);padding:12px;border-radius:10px;margin-top:10px}
-.row{display:flex;gap:12px;align-items:center}
-.col{flex:1}
-.zones{display:flex;gap:12px;margin-top:12px}
-.panel{flex:1;background:#081726;padding:12px;border-radius:8px;min-height:300px;overflow:auto}
-.zone{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03)}
-.support{color:#9fe8a6}
-.resist{color:#f6b28b}
-.muted{color:var(--muted)}
-.status{margin-top:8px}
-</style>
+  <title>Delta Spike Detector</title>
+  <style>
+    body {
+      background: #0e1626;
+      color: white;
+      font-family: Arial;
+      padding: 20px;
+    }
+    select, input, button {
+      width: 100%;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 6px;
+      border: none;
+      background: #1b263b;
+      color: white;
+    }
+    button {
+      background: #3b82f6;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .zone {
+      background: #162032;
+      padding: 10px;
+      border-radius: 6px;
+      margin-top: 8px;
+    }
+  </style>
 </head>
+
 <body>
-<div class="wrap">
-<h1>Delta Spike — Support/Resistance (Binance futures)</h1>
-<div
+  <h2>Delta Spike Support / Resistance</h2>
+
+  <label>Symbol</label>
+  <select id="symbol">
+    <option value="BTCUSDT">BTCUSDT</option>
+    <option value="ETHUSDT">ETHUSDT</option>
+    <option value="BNBUSDT">BNBUSDT</option>
+    <option value="SOLUSDT">SOLUSDT</option>
+  </select>
+
+  <label>Interval</label>
+  <select id="interval">
+    <option value="1m">1m</option>
+    <option value="5m">5m</option>
+    <option value="15m">15m</option>
+    <option value="1h" selected>1h</option>
+    <option value="4h">4h</option>
+  </select>
+
+  <label>Delta Threshold</label>
+  <input type="number" id="threshold" step="0.1" value="1">
+
+  <button onclick="fetchZones()">Fetch Delta Zones</button>
+
+  <h3>Detected Spike Levels</h3>
+  <div id="result"></div>
+
+  <script>
+    async function fetchZones() {
+      const symbol = document.getElementById("symbol").value;
+      const interval = document.getElementById("interval").value;
+      const threshold = document.getElementById("threshold").value;
+
+      const out = document.getElementById("result");
+      out.innerHTML = "Loading...";
+
+      try {
+        const r = await fetch(`/api/zones?symbol=${symbol}&interval=${interval}&threshold=${threshold}`);
+        const j = await r.json();
+
+        if (!j.zones.length) {
+          out.innerHTML = "<p>No delta spike zones found.</p>";
+          return;
+        }
+
+        let html = "";
+        j.zones.forEach(z => {
+          html += `
+            <div class="zone">
+              <b>Price:</b> ${z.price}<br>
+              <b>Delta:</b> ${z.delta}<br>
+              <b>Time:</b> ${new Date(z.time).toLocaleString()}
+            </div>
+          `;
+        });
+
+        out.innerHTML = html;
+      } catch (err) {
+        out.innerHTML = "Error: " + err.message;
+      }
+    }
+  </script>
+</body>
+</html>
