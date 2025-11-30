@@ -1,528 +1,321 @@
 /**
- * server/index.js
- *
- * Aggregator (Option B) — multi-exchange historical backfill + aggregated buckets.
- *
- * Supported exchanges (connectors included):
- *  - binance (futures aggTrades)
- *  - binance-spot (recent trades)
- *  - okx
- *  - bybit
- *  - kucoin
- *  - bitget
- *  - gate
- *  - huobi
- *
- * Endpoints:
- *  - GET  /api/health
- *  - GET  /api/symbols
- *  - GET  /api/current-price?symbol=BTCUSDT
- *  - GET  /api/top-clusters?symbol=...&exchanges=binance,okx&periodMs=...&bucket=1&limit=100&sort=volume_desc
- *  - POST /api/backfill    { symbol, exchanges:[...], startTs?, endTs?, years? }
- *  - GET  /api/backfill/status/:id
- *  - GET  /api/backfill/jobs
+ * Hybrid Fast Trend-Origin Detector backend
+ * - Aggregates exchange trades into minute bins
+ * - Computes buy/sell delta per price-bucket
+ * - Exposes endpoints: backfill, backfill status, current-price, top-zones
  *
  * Notes:
- *  - Optionally protect POST /api/backfill with BACKFILL_KEY in env var (header x-api-key)
- *  - The backfill engine is best-effort — some exchanges expose limited history.
+ * - This is an MVP focused on correctness and clarity.
+ * - In production add authentication, rate-limits, retries, and queueing.
  */
-
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const axios = require('axios');
 const Database = require('better-sqlite3');
-const { default: pRetry } = require('p-retry');
+const pRetry = require('p-retry');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// --- DB setup ---
+// --- DB init ---
 const DB_FILE = path.join(__dirname, 'data.sqlite');
 const db = new Database(DB_FILE);
 
-// create tables if needed
+// tables:
+// minute_bins: aggregated per symbol, exchange, minute_ts, price_bucket -> buyVol, sellVol
 db.exec(`
-  CREATE TABLE IF NOT EXISTS trades (
-    id TEXT PRIMARY KEY,
-    exchange TEXT,
-    symbol TEXT,
-    price REAL,
-    qty REAL,
-    side TEXT,
-    ts INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts);
-
-  CREATE TABLE IF NOT EXISTS symbols (
-    symbol TEXT PRIMARY KEY,
-    last_seen_ts INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS backfill_jobs (
-    id TEXT PRIMARY KEY,
-    symbol TEXT,
-    exchange TEXT,
-    start_ts INTEGER,
-    end_ts INTEGER,
-    current_ts INTEGER,
-    status TEXT,
-    message TEXT,
-    updated_at INTEGER
-  );
+CREATE TABLE IF NOT EXISTS minute_bins (
+  id TEXT PRIMARY KEY,
+  symbol TEXT,
+  exchange TEXT,
+  minute_ts INTEGER,
+  bucket REAL,
+  buy_vol REAL DEFAULT 0,
+  sell_vol REAL DEFAULT 0,
+  last_ts INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_minute_symbol_ts ON minute_bins(symbol, minute_ts);
+CREATE INDEX IF NOT EXISTS idx_minute_symbol_bucket ON minute_bins(symbol, bucket);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  symbol TEXT,
+  exchange TEXT,
+  status TEXT,
+  created_at INTEGER,
+  updated_at INTEGER,
+  message TEXT
+);
 `);
 
-// --- utilities ---
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-function nowMs(){ return Date.now(); }
-function makeJobId(){ return `job-${Math.random().toString(36).slice(2,9)}-${Date.now()}`; }
-function roundToBucket(price, bucketSize){ return Math.round(price / bucketSize) * bucketSize; }
+// helper: upsert bin
+const upsertBin = db.prepare(`
+INSERT INTO minute_bins (id, symbol, exchange, minute_ts, bucket, buy_vol, sell_vol, last_ts)
+VALUES (@id,@symbol,@exchange,@minute_ts,@bucket,@buy_vol,@sell_vol,@last_ts)
+ON CONFLICT(id) DO UPDATE SET
+  buy_vol = minute_bins.buy_vol + @buy_vol,
+  sell_vol = minute_bins.sell_vol + @sell_vol,
+  last_ts = MAX(minute_bins.last_ts, @last_ts)
+`);
 
-// insert trade and update symbols table
-function insertTrade(trade) {
-  try {
-    const stmt = db.prepare('INSERT OR IGNORE INTO trades (id, exchange, symbol, price, qty, side, ts) VALUES (?, ?, ?, ?, ?, ?, ?)');
-    stmt.run(trade.id, trade.exchange, trade.symbol, trade.price, trade.qty, trade.side, trade.ts);
-    // update symbol last seen
-    const sst = db.prepare('INSERT INTO symbols (symbol, last_seen_ts) VALUES (?, ?) ON CONFLICT(symbol) DO UPDATE SET last_seen_ts = excluded.last_seen_ts WHERE excluded.last_seen_ts > symbols.last_seen_ts');
-    sst.run(trade.symbol, trade.ts || Date.now());
-  } catch (e) {
-    console.error('insertTrade error', e && e.message);
+// insert job
+const insertJob = db.prepare(`INSERT INTO jobs (id,symbol,exchange,status,created_at,updated_at,message) VALUES (@id,@symbol,@exchange,@status,@created_at,@updated_at,@message)`);
+const updateJob = db.prepare(`UPDATE jobs SET status=@status, updated_at=@updated_at, message=@message WHERE id=@id`);
+const getJob = db.prepare(`SELECT * FROM jobs WHERE id = ?`);
+
+// --- config ---
+const PRICE_BUCKET_SIZE = 1.0; // default price bucket; can be changed by query param
+const DEFAULT_LIMIT = 300;
+
+// --- exchange fetchers (minimal) ---
+// Each fetcher returns an array of trades: { price: number, qty: number, side: 'buy'|'sell', ts: epoch_ms }
+
+async function fetchBinanceTrades(symbol, limit=1000, startTime=null, endTime=null){
+  // symbol like BTCUSDT, use aggTrades which returns 'p' price, 'q' qty, 'm' maker flag (true means seller maker)
+  const qs = { limit };
+  if (startTime) qs.startTime = startTime;
+  if (endTime) qs.endTime = endTime;
+  const url = `https://fapi.binance.com/fapi/v1/aggTrades?symbol=${symbol}&${new URLSearchParams(qs).toString()}`;
+  const r = await axios.get(url, { timeout: 20000 });
+  // r.data is array
+  return r.data.map(t => ({
+    price: parseFloat(t.p),
+    qty: parseFloat(t.q),
+    side: (t.m === true) ? 'sell' : 'buy',
+    ts: t.T || Date.now()
+  }));
+}
+
+async function fetchOKXTrades(symbol, limit=100){
+  // OKX uses different symbol conventions; user must supply correct instId if needed.
+  // We'll try typical futures convention: symbol like BTCUSDT -> BTC-USDT-SWAP
+  let instId = symbol;
+  if (!symbol.includes('-')) {
+    instId = symbol.replace(/USDT$/i, '-USDT-SWAP');
   }
-}
-
-// --- Exchange connectors (safe parsing) -- return arrays or empty []
-async function fetchBinanceAggTrades(symbol, startTime, endTime, limit = 1000) {
-  const url = `https://fapi.binance.com/fapi/v1/aggTrades?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=${limit}`;
-  const r = await axios.get(url, { timeout: 20000 });
-  return Array.isArray(r.data) ? r.data : [];
-}
-
-// binance spot recent trades (no start/end)
-async function fetchBinanceSpotTrades(symbol, limit = 1000) {
-  const url = `https://api.binance.com/api/v3/trades?symbol=${symbol}&limit=${limit}`;
-  const r = await axios.get(url, { timeout: 20000 });
-  return Array.isArray(r.data) ? r.data : [];
-}
-
-// OKX recent trades (data.data)
-async function fetchOKXTrades(instId, limit = 100) {
   const url = `https://www.okx.com/api/v5/market/trades?instId=${instId}&limit=${limit}`;
   const r = await axios.get(url, { timeout: 20000 });
-  return (r.data && r.data.data) ? r.data.data : [];
+  // r.data.data is array of { side, px, sz, ts }
+  if (!r.data || !r.data.data) return [];
+  return (r.data.data || []).map(t => ({
+    price: parseFloat(t.px || t.p),
+    qty: parseFloat(t.sz || t.sz || 0),
+    side: (String(t.side || '').toLowerCase()==='sell') ? 'sell' : 'buy',
+    ts: Number(t.ts) || Date.now()
+  }));
 }
 
-// Bybit recent trading records
-async function fetchBybitTrades(symbol, limit = 200) {
+async function fetchBybitTrades(symbol, limit=200){
+  // Bybit linear: symbol same e.g. BTCUSDT
   const url = `https://api.bybit.com/public/linear/recent-trading-records?symbol=${symbol}&limit=${limit}`;
   const r = await axios.get(url, { timeout: 20000 });
-  return (r.data && r.data.result) ? r.data.result : [];
+  if (!r.data || !r.data.result) return [];
+  return (r.data.result || []).map(t => ({
+    price: parseFloat(t.price),
+    qty: parseFloat(t.qty || 0),
+    side: (t.side === 'Sell' || t.side === 'sell') ? 'sell' : 'buy',
+    ts: Number(t.trade_time_ms) || Date.now()
+  }));
 }
 
-// KuCoin histories
-async function fetchKucoinTrades(symbol) {
-  const url = `https://api.kucoin.com/api/v1/market/histories?symbol=${symbol}`;
-  const r = await axios.get(url, { timeout: 20000 });
-  // r.data.data is array of {time, price, size}
-  return (r.data && r.data.data) ? r.data.data : [];
+// Map exchange -> fetcher
+const FETCHERS = {
+  binance: fetchBinanceTrades,
+  okx: fetchOKXTrades,
+  bybit: fetchBybitTrades
+};
+
+// --- aggregation helpers ---
+function toMinuteTs(ts) {
+  return Math.floor(ts / 60000) * 60000;
+}
+function bucketPrice(price, bucketSize) {
+  return Math.round(price / bucketSize) * bucketSize;
 }
 
-// Bitget recent fills (public endpoints differ between spot / futures; try safe)
-async function fetchBitgetTrades(symbol) {
-  // Bitget API variations — try generic endpoints; map defensively
-  try {
-    // futures/contract may use symbol like BTCUSDT
-    const url = `https://api.bitget.com/api/spot/v1/market/trades?symbol=${symbol}`;
-    const r = await axios.get(url, { timeout: 20000 });
-    if (r.data && r.data.data) return r.data.data;
-    if (r.data && Array.isArray(r.data)) return r.data;
-  } catch (e) {
-    // fallback: try mix v1 fills (may require auth rarely)
-    try {
-      const url2 = `https://api.bitget.com/api/mix/v1/market/fills?symbol=${symbol}`;
-      const r2 = await axios.get(url2, { timeout: 20000 });
-      if (r2.data && r2.data.data) return r2.data.data;
-    } catch (e2) {}
-  }
-  return [];
-}
-
-// Gate.io recent trades
-async function fetchGateTrades(symbol) {
-  // gate uses currency_pair like BTC_USDT or BTC-USDT sometimes; try both
-  const tryVariants = [symbol.replace('USDT','_USDT'), symbol.replace('USDT','-USDT'), symbol];
-  for (const cp of tryVariants) {
-    try {
-      const url = `https://api.gateio.ws/api/v4/spot/trades?currency_pair=${cp}`;
-      const r = await axios.get(url, { timeout: 20000 });
-      if (r.data && Array.isArray(r.data)) return r.data;
-    } catch (e) {
-      // ignore and try next
-    }
-  }
-  return [];
-}
-
-// Huobi recent trades
-async function fetchHuobiTrades(symbol) {
-  // huobi symbol often lowercase like btcusdt
-  const sym = symbol.toLowerCase();
-  try {
-    const url = `https://api.huobi.pro/market/history/trade?symbol=${sym}`;
-    const r = await axios.get(url, { timeout: 20000 });
-    // r.data.data is array { id, ts, data: [ { price, amount, direction } ] }
-    if (r.data && r.data.data) {
-      return r.data.data.flatMap(entry => (entry.data || []).map(d => ({ ...d, ts: entry.id || entry.ts || Date.now() })));
-    }
-  } catch (e) {
-    // some instances use hadax or hbdm; ignore
-  }
-  return [];
-}
-
-// Normalize and insert arrays returned by fetchers inside backfill window handling
-
-// --- Backfill job engine (resumable) ---
-async function createBackfillJob({ symbol, exchange, startTs, endTs }) {
-  const jobId = makeJobId();
+// process trades into DB minute_bins
+function ingestTrades(trades, symbol, exchange, bucketSize = PRICE_BUCKET_SIZE) {
+  // trades: array of {price, qty, side, ts}
   const now = Date.now();
-  const insert = db.prepare('INSERT INTO backfill_jobs (id, symbol, exchange, start_ts, end_ts, current_ts, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-  insert.run(jobId, symbol, exchange, startTs, endTs, startTs, 'pending', now);
-  // run async
-  runBackfill(jobId).catch(err => {
-    console.error('runBackfill error for', jobId, err && err.message);
+  const insert = db.transaction((rows) => {
+    for (const t of rows) {
+      const minute_ts = toMinuteTs(t.ts || now);
+      const bucket = bucketPrice(t.price, bucketSize);
+      const id = `${symbol}::${exchange}::${minute_ts}::${bucket}`;
+      const obj = {
+        id, symbol, exchange, minute_ts, bucket,
+        buy_vol: t.side === 'buy' ? (t.qty || 0) : 0,
+        sell_vol: t.side === 'sell' ? (t.qty || 0) : 0,
+        last_ts: t.ts || now
+      };
+      upsertBin.run(obj);
+    }
   });
-  return jobId;
+  insert(trades);
 }
 
-async function updateJob(jobId, props) {
-  const now = Date.now();
-  const row = db.prepare('SELECT * FROM backfill_jobs WHERE id = ?').get(jobId);
-  if (!row) return;
-  const current_ts = (props.current_ts !== undefined ? props.current_ts : row.current_ts);
-  const status = props.status || row.status;
-  const message = props.message || row.message;
-  db.prepare('UPDATE backfill_jobs SET current_ts = ?, status = ?, message = ?, updated_at = ? WHERE id = ?')
-    .run(current_ts, status, message, now, jobId);
-}
-
-async function runBackfill(jobId) {
-  const jobRow = db.prepare('SELECT * FROM backfill_jobs WHERE id = ?').get(jobId);
-  if (!jobRow) throw new Error('job not found ' + jobId);
-  const { symbol, exchange } = jobRow;
-  let current = Number(jobRow.current_ts) || Number(jobRow.start_ts);
-  const end = Number(jobRow.end_ts);
-  await updateJob(jobId, { status: 'running' });
-
-  const windowMs = 60 * 60 * 1000; // 1 hour windows
+// --- backfill job runner (simple) ---
+async function runBackfillJob(jobId, symbol, exchange, years=1, bucketSize=PRICE_BUCKET_SIZE) {
+  const start = Date.now();
+  updateJob.run({ id: jobId, status: 'running', updated_at: Date.now(), message: 'starting' });
   try {
-    while (current <= end) {
-      const wEnd = Math.min(end, current + windowMs - 1);
-      try {
-        // fetch based on exchange
-        if (exchange === 'binance') {
-          const data = await pRetry(() => fetchBinanceAggTrades(symbol, current, wEnd, 1000), { retries: 3 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              const trade = {
-                id: `${symbol}-binance-${t.a || t.aggregateId || t.tradeId || Math.random()}`,
-                exchange: 'binance',
-                symbol,
-                price: parseFloat(t.p),
-                qty: parseFloat(t.q || t.qty || 0),
-                side: (t.m === true) ? 'sell' : 'buy',
-                ts: t.T || Date.now()
-              };
-              insertTrade(trade);
-            }
-          }
-        } else if (exchange === 'binance-spot') {
-          // Binance spot doesn't support start/end; best-effort for this window (fetch latest)
-          const data = await pRetry(() => fetchBinanceSpotTrades(symbol, 1000), { retries: 2 });
-          for (const t of data) {
-            // t: { id, price, qty, quoteQty, time, isBuyerMaker }
-            insertTrade({
-              id: `${symbol}-binance-spot-${t.id || Math.random()}`,
-              exchange: 'binance-spot',
-              symbol,
-              price: parseFloat(t.price),
-              qty: parseFloat(t.qty || t.qty),
-              side: t.isBuyerMaker ? 'sell' : 'buy',
-              ts: t.time || Date.now()
-            });
-          }
-        } else if (exchange === 'okx') {
-          const instId = symbol.replace(/USDT$/i, '-USDT-SWAP');
-          const data = await pRetry(() => fetchOKXTrades(instId, 100), { retries: 2 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              // OKX trade shape: { p, sz, side, ts }
-              insertTrade({
-                id: `${symbol}-okx-${t.ts || Math.random()}`,
-                exchange: 'okx',
-                symbol,
-                price: parseFloat(t.p),
-                qty: parseFloat(t.sz || t.qty || 0),
-                side: (t.side === 'sell' || t.side === 'S') ? 'sell' : 'buy',
-                ts: Number(t.ts) || Date.now()
-              });
-            }
-          }
-        } else if (exchange === 'bybit') {
-          const data = await pRetry(() => fetchBybitTrades(symbol, 200), { retries: 2 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              insertTrade({
-                id: `${symbol}-bybit-${t.trade_time_ms || Math.random()}`,
-                exchange: 'bybit',
-                symbol,
-                price: parseFloat(t.price),
-                qty: parseFloat(t.qty || t.size || 0),
-                side: (t.side === 'Sell') ? 'sell' : 'buy',
-                ts: t.trade_time_ms || Date.now()
-              });
-            }
-          }
-        } else if (exchange === 'kucoin') {
-          const data = await pRetry(() => fetchKucoinTrades(symbol), { retries: 2 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              // t: { time, price, size }
-              insertTrade({
-                id: `${symbol}-kucoin-${t.time || Math.random()}`,
-                exchange: 'kucoin',
-                symbol,
-                price: parseFloat(t.price),
-                qty: parseFloat(t.size || t.qty || 0),
-                side: (t.side === 'sell' || t.side === 's') ? 'sell' : 'buy',
-                ts: t.time || Date.now()
-              });
-            }
-          }
-        } else if (exchange === 'bitget') {
-          const data = await pRetry(() => fetchBitgetTrades(symbol), { retries: 2 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              // best-effort mapping: { price, size, side, ts } or different shapes
-              insertTrade({
-                id: `${symbol}-bitget-${t.tradeId || t.t || Math.random()}`,
-                exchange: 'bitget',
-                symbol,
-                price: parseFloat(t.price || t.p || 0),
-                qty: parseFloat(t.size || t.qty || t.amount || 0),
-                side: (t.side || t.direction || '').toLowerCase().includes('sell') ? 'sell' : 'buy',
-                ts: t.ts || t.time || Date.now()
-              });
-            }
-          }
-        } else if (exchange === 'gate') {
-          const data = await pRetry(() => fetchGateTrades(symbol), { retries: 2 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              // t: { time, price, amount, side? }
-              insertTrade({
-                id: `${symbol}-gate-${t.trade_id || t.id || Math.random()}`,
-                exchange: 'gate',
-                symbol,
-                price: parseFloat(t.price),
-                qty: parseFloat(t.amount || t.size || 0),
-                side: (t.side || '').toLowerCase().includes('sell') ? 'sell' : 'buy',
-                ts: t.time || Date.now()
-              });
-            }
-          }
-        } else if (exchange === 'huobi') {
-          const data = await pRetry(() => fetchHuobiTrades(symbol), { retries: 2 });
-          if (Array.isArray(data) && data.length) {
-            for (const t of data) {
-              // t likely shape { price, amount, direction, ts }
-              insertTrade({
-                id: `${symbol}-huobi-${t.ts || Math.random()}`,
-                exchange: 'huobi',
-                symbol,
-                price: parseFloat(t.price || t.price),
-                qty: parseFloat(t.amount || t.qty || 0),
-                side: (t.direction || '').toLowerCase().includes('sell') ? 'sell' : 'buy',
-                ts: t.ts || Date.now()
-              });
-            }
-          }
-        } else {
-          // unknown exchange — skip
-          console.warn('unknown exchange in backfill:', exchange);
-        }
-
-        // progress: mark current window done
-        current = wEnd + 1;
-        await updateJob(jobId, { current_ts: current, status: 'running' });
-        // polite delay
-        await sleep(250);
-      } catch (errWindow) {
-        console.error('window fetch error', { jobId, symbol, exchange, current, err: errWindow && errWindow.message });
-        await updateJob(jobId, { status: 'failed', message: String(errWindow) });
-        throw errWindow;
+    // We'll fetch recent trades in windows. For safety we limit the number of requests.
+    // Strategy: fetch last N minutes windows until years satisfied or limit reached.
+    const now = Date.now();
+    const from = now - (years * 365 * 24 * 3600 * 1000);
+    const windowMs = 60 * 60 * 1000; // 1 hour per request for binance aggTrades (safe)
+    for (let s = from; s < now; s += windowMs) {
+      const e = Math.min(now, s + windowMs - 1);
+      // call fetcher with retries
+      const fetcher = FETCHERS[exchange];
+      if (!fetcher) {
+        updateJob.run({ id: jobId, status: 'failed', updated_at: Date.now(), message: `no fetcher for ${exchange}` });
+        return;
       }
+      try {
+        const trades = await pRetry(() => fetcher(symbol, 1000, s, e), { retries: 2, minTimeout: 400 });
+        if (Array.isArray(trades) && trades.length) {
+          ingestTrades(trades, symbol, exchange, bucketSize);
+          updateJob.run({ id: jobId, status: 'running', updated_at: Date.now(), message: `processed window ${new Date(s).toISOString()}` });
+        } else {
+          updateJob.run({ id: jobId, status: 'running', updated_at: Date.now(), message: `no trades window ${new Date(s).toISOString()}` });
+        }
+      } catch (err) {
+        // log and continue
+        console.warn('fetch window err', exchange, symbol, s, err.message || err);
+        updateJob.run({ id: jobId, status: 'running', updated_at: Date.now(), message: `error window ${new Date(s).toISOString()}: ${String(err.message||err)}` });
+      }
+      // small pause to be nice
+      await new Promise(r => setTimeout(r, 200));
     }
-    await updateJob(jobId, { status: 'done', current_ts: end, message: 'completed' });
-    return true;
+
+    updateJob.run({ id: jobId, status: 'done', updated_at: Date.now(), message: 'backfill complete' });
   } catch (err) {
-    await updateJob(jobId, { status: 'failed', message: String(err) });
-    throw err;
+    console.error('job error', err);
+    updateJob.run({ id: jobId, status: 'failed', updated_at: Date.now(), message: String(err) });
+  } finally {
+    console.log(`job ${jobId} finished in ${(Date.now()-start)/1000}s`);
   }
 }
 
-// --- API Endpoints ---
+// --- API routes ---
 
-// serve UI static
+// serve frontend static
 app.use('/', express.static(path.join(__dirname, '../web')));
 
-// health
-app.get('/api/health', (req, res) => res.json({ ok: true, now: Date.now() }));
-
-// symbols list
-app.get('/api/symbols', (req,res) => {
-  const rows = db.prepare('SELECT symbol, last_seen_ts FROM symbols ORDER BY last_seen_ts DESC').all();
-  res.json({ symbols: rows.map(r => ({ symbol: r.symbol, lastSeen: r.last_seen_ts })) });
-});
-
-// current price (tries Binance -> OKX -> Bybit)
-app.get('/api/current-price', async (req, res) => {
-  const symbol = (req.query.symbol || 'BTCUSDT').toUpperCase();
-  try {
-    try {
-      const r = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`, { timeout: 8000 });
-      if (r && r.data && r.data.price) return res.json({ price: parseFloat(r.data.price), source: 'binance' });
-    } catch (e) {}
-    try {
-      const instId = symbol.replace(/USDT$/i, '-USDT-SWAP');
-      const r2 = await axios.get(`https://www.okx.com/api/v5/market/ticker?instId=${instId}`, { timeout: 8000 });
-      if (r2 && r2.data && r2.data.data && r2.data.data[0] && r2.data.data[0].last) {
-        return res.json({ price: parseFloat(r2.data.data[0].last), source: 'okx' });
-      }
-    } catch (e) {}
-    try {
-      const r3 = await axios.get(`https://api.bybit.com/v2/public/tickers?symbol=${symbol}`, { timeout: 8000 });
-      if (r3 && r3.data && r3.data.result && r3.data.result[0] && r3.data.result[0].last_price) {
-        return res.json({ price: parseFloat(r3.data.result[0].last_price), source: 'bybit' });
-      }
-    } catch (e) {}
-    return res.status(500).json({ error: 'no price source available' });
-  } catch (err) {
-    return res.status(500).json({ error: String(err) });
-  }
-});
-
-// top-clusters (aggregate across exchanges)
-app.get('/api/top-clusters', (req, res) => {
-  try {
-    const symbol = (req.query.symbol || 'BTCUSDT').toUpperCase();
-    let exchanges = (req.query.exchanges || 'all').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
-    const periodMs = Number(req.query.periodMs) || 24 * 3600 * 1000;
-    const bucket = Number(req.query.bucket) || 1.0;
-    const limit = Number(req.query.limit) || 500;
-    const sort = (req.query.sort || 'volume_desc').toLowerCase();
-
-    // if 'all' or exchange list includes 'all', query all exchanges recorded in DB OR fallback to defaults
-    if (exchanges.includes('all')) {
-      const rows = db.prepare('SELECT DISTINCT exchange FROM trades WHERE symbol = ?').all(symbol);
-      exchanges = rows.map(r => r.exchange);
-      if (!exchanges || !exchanges.length) {
-        // default set
-        exchanges = ['binance','binance-spot','okx','bybit','kucoin','bitget','gate','huobi'];
-      }
-    }
-
-    // build SQL
-    if (!exchanges.length) exchanges = ['binance'];
-    const placeholders = exchanges.map(()=>'?').join(',');
-    const since = Date.now() - periodMs;
-    const sql = `SELECT price, qty, ts FROM trades WHERE symbol = ? AND exchange IN (${placeholders}) AND ts >= ?`;
-    const params = [symbol, ...exchanges, since];
-    const rows = db.prepare(sql).all(...params);
-
-    if (!rows || !rows.length) return res.json({ symbol, exchanges, clusters: [] });
-
-    const buckets = new Map();
-    for (const r of rows) {
-      const pb = roundToBucket(r.price, bucket);
-      const key = pb.toFixed(8);
-      const v = buckets.get(key) || { price: pb, volume: 0, lastTs: 0 };
-      v.volume += r.qty;
-      v.lastTs = Math.max(v.lastTs, r.ts);
-      buckets.set(key, v);
-    }
-
-    let arr = Array.from(buckets.values());
-    if (sort === 'price_asc') arr.sort((a,b) => a.price - b.price);
-    else if (sort === 'price_desc') arr.sort((a,b) => b.price - a.price);
-    else arr.sort((a,b) => {
-      if (b.volume !== a.volume) return b.volume - a.volume;
-      return a.price - b.price;
-    });
-
-    arr = arr.slice(0, limit);
-    return res.json({ symbol, exchanges, clusters: arr });
-  } catch (err) {
-    console.error('/api/top-clusters error', err && err.message);
-    return res.status(500).json({ error: String(err) });
-  }
-});
-
 // POST /api/backfill
-// Body: { symbol, exchanges:[...], startTs?, endTs?, years? }
-app.post('/api/backfill', async (req,res) => {
-  try {
-    const KEY = process.env.BACKFILL_KEY;
-    if (KEY) {
-      const provided = req.headers['x-api-key'];
-      if (!provided || provided !== KEY) {
-        return res.status(403).json({ error: 'forbidden' });
-      }
-    }
-    const body = req.body || {};
-    const symbol = (body.symbol || '').toUpperCase();
-    if (!symbol) return res.status(400).json({ error: 'symbol required' });
-    const exch = Array.isArray(body.exchanges) && body.exchanges.length ? body.exchanges.map(e=>e.toLowerCase()) : (body.exchanges || body.exchange ? (Array.isArray(body.exchanges) ? body.exchanges : [body.exchange]) : ['binance']);
-    let startTs = Number(body.startTs) || null;
-    let endTs = Number(body.endTs) || Date.now();
-    if (body.years && !startTs) {
-      const yrs = Number(body.years) || 1;
-      startTs = Date.now() - yrs * 365 * 24 * 3600 * 1000;
-    }
-    if (!startTs) startTs = Date.now() - 24*3600*1000;
+// body: { symbol, exchanges: ['binance','okx'], years: 1, bucketSize: 1 }
+app.post('/api/backfill', (req, res) => {
+  const body = req.body || {};
+  const symbol = (body.symbol || '').toUpperCase();
+  const exchanges = body.exchanges || (body.exchange ? [body.exchange] : ['binance']);
+  const years = Number(body.years) || 1;
+  const bucketSize = Number(body.bucketSize) || PRICE_BUCKET_SIZE;
 
-    const jobIds = [];
-    for (const ex of exch) {
-      // map alias 'binance' -> appropriate connector 'binance' (futures); allow 'binance-spot'
-      const normalized = ex.toLowerCase();
-      const jid = await createBackfillJob({ symbol, exchange: normalized, startTs, endTs });
-      jobIds.push(jid);
-    }
-    return res.json({ ok: true, message: 'backfill started', jobs: jobIds });
-  } catch (err) {
-    console.error('/api/backfill error', err && err.message);
-    return res.status(500).json({ error: String(err) });
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+
+  const jobs = [];
+  for (const ex of exchanges) {
+    const jid = uuidv4();
+    const now = Date.now();
+    insertJob.run({ id: jid, symbol, exchange: ex, status: 'queued', created_at: now, updated_at: now, message: 'queued' });
+    // start job (fire-and-forget)
+    runBackfillJob(jid, symbol, ex, years, bucketSize).catch(e => console.error(e));
+    jobs.push(jid);
   }
+  res.json({ ok: true, jobs });
 });
 
-// job status
-app.get('/api/backfill/status/:id', (req,res) => {
+// GET /api/backfill/status/:id
+app.get('/api/backfill/status/:id', (req, res) => {
   const id = req.params.id;
-  const row = db.prepare('SELECT * FROM backfill_jobs WHERE id = ?').get(id);
-  if (!row) return res.status(404).json({ error: 'job not found' });
-  res.json({ job: row });
+  const j = getJob.get(id);
+  if (!j) return res.status(404).json({error:'job not found'});
+  res.json({ job: j });
 });
 
-// list recent jobs
-app.get('/api/backfill/jobs', (req,res) => {
-  const rows = db.prepare('SELECT * FROM backfill_jobs ORDER BY updated_at DESC LIMIT 50').all();
-  res.json({ jobs: rows });
+// GET /api/current-price?symbol=BTCUSDT
+// we try Binance public ticker first; fallback to last minute bin price
+app.get('/api/current-price', async (req, res) => {
+  const symbol = (req.query.symbol || '').toUpperCase();
+  if (!symbol) return res.status(400).json({error:'symbol required'});
+  try {
+    // Binance ticker (works for many symbols)
+    const r = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`, { timeout: 5000 });
+    if (r.data && r.data.price) return res.json({ price: Number(r.data.price) });
+  } catch (e) {
+    // ignore and fallback
+  }
+  // fallback: derive from last minute_bins
+  const row = db.prepare(`SELECT bucket, minute_ts FROM minute_bins WHERE symbol = ? ORDER BY minute_ts DESC LIMIT 1`).get(symbol);
+  if (row) return res.json({ price: row.bucket });
+  return res.status(404).json({error:'price not available'});
 });
 
-// start server
+// GET /api/top-zones?symbol=BTCUSDT&exchanges=binance,okx&periodMs=86400000&bucket=1&limit=300&sort=volume_desc
+app.get('/api/top-zones', (req, res) => {
+  const symbol = (req.query.symbol || '').toUpperCase();
+  const exStr = req.query.exchanges || 'binance';
+  const exchanges = exStr.split(',').map(s=>s.trim()).filter(Boolean);
+  const periodMs = Number(req.query.periodMs) || (24*3600*1000);
+  const bucketSize = Number(req.query.bucket) || PRICE_BUCKET_SIZE;
+  const limit = Number(req.query.limit) || DEFAULT_LIMIT;
+  const sort = req.query.sort || 'delta_desc'; // delta_desc | volume_desc | price_asc
+
+  if (!symbol) return res.status(400).json({error:'symbol required'});
+
+  const since = Date.now() - periodMs;
+  // aggregate across exchanges, minute_ts >= since
+  const rows = db.prepare(`
+    SELECT bucket,
+           SUM(buy_vol) as buy_vol,
+           SUM(sell_vol) as sell_vol,
+           MAX(last_ts) as lastTs
+    FROM minute_bins
+    WHERE symbol = ? AND minute_ts >= ? AND (@exchanges_clause)
+    GROUP BY bucket
+  `).all; // we will build query manually because sqlite doesn't support array param easily
+
+  // Build manual query string
+  const exClause = exchanges.map(e => `'${e.replace(/'/g,"''")}'`).join(',');
+  const q = `
+    SELECT bucket,
+           SUM(buy_vol) as buy_vol,
+           SUM(sell_vol) as sell_vol,
+           MAX(last_ts) as lastTs
+    FROM minute_bins
+    WHERE symbol = ? AND minute_ts >= ? AND exchange IN (${exClause})
+    GROUP BY bucket
+  `;
+  const data = db.prepare(q).all(symbol, since);
+
+  // compute delta and volume
+  const zones = data.map(r => {
+    const buy = Number(r.buy_vol || 0);
+    const sell = Number(r.sell_vol || 0);
+    const delta = buy - sell;
+    const vol = buy + sell;
+    return { price: Number(r.bucket), buy, sell, delta, volume: vol, lastTs: r.lastTs || null };
+  });
+
+  // Sorting
+  if (sort === 'delta_desc') zones.sort((a,b)=> Math.abs(b.delta) - Math.abs(a.delta));
+  else if (sort === 'volume_desc') zones.sort((a,b)=> b.volume - a.volume);
+  else if (sort === 'price_asc') zones.sort((a,b)=> a.price - b.price);
+  else if (sort === 'price_desc') zones.sort((a,b)=> b.price - a.price);
+
+  res.json({ clusters: zones.slice(0, limit) });
+});
+
+// GET /api/symbols -> returns known symbols in DB (last seen time)
+app.get('/api/symbols', (req,res) => {
+  const rows = db.prepare(`SELECT symbol, MAX(minute_ts) as lastSeen FROM minute_bins GROUP BY symbol ORDER BY lastSeen DESC LIMIT 500`).all();
+  res.json({ symbols: rows.map(r => ({symbol: r.symbol, lastSeen: r.lastSeen})) });
+});
+
 const port = process.env.PORT || 3000;
-app.listen(port, ()=> {
-  console.log('Server listening on', port);
-});
+app.listen(port, ()=> console.log('Trend-Origin server listening on', port));
