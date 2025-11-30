@@ -1,264 +1,30 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Hybrid Trend-Origin Detector</title>
-  <style>
-    :root{--bg:#071226;--card:#0f2030;--accent:#0f6cff;--muted:#9fb0c8;color:#e6f0fb}
-    body{font-family:Inter,Arial,Helvetica;background:var(--bg);color:var(--muted);margin:0;padding:18px}
-    .wrap{max-width:1200px;margin:0 auto}
-    h1{color:#fff;font-size:20px;margin:0 0 14px}
-    .grid{display:grid;grid-template-columns:300px 1fr;gap:18px}
-    .card{background:var(--card);padding:14px;border-radius:10px}
-    label{font-size:13px;color:var(--muted)}
-    select,input,button{padding:8px;border-radius:8px;border:0;background:#081726;color:var(--muted);margin:6px 0}
-    button{background:var(--accent);color:white;cursor:pointer}
-    .muted{color:var(--muted);font-size:12px}
-    .cluster{padding:10px;border-radius:8px;margin:6px 0;border:1px solid rgba(255,255,255,0.03);display:flex;justify-content:space-between;align-items:center}
-    .cluster .left{display:flex;flex-direction:column}
-    .green{color:#b5f7c1} .red{color:#ffb3b3}
-    .controls-row{display:flex;gap:8px;flex-wrap:wrap}
-    .big{font-size:18px;color:#fff}
-    .small{font-size:12px;color:var(--muted)}
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Delta Spike — Support/Resistance (Binance only)</title>
+<style>
+:root{--bg:#071226;--card:#0f2030;--accent:#0f6cff;--muted:#9fb0c8;color:#e6f0fb}
+body{font-family:Inter,Arial,Helvetica;background:var(--bg);color:var(--muted);margin:0;padding:18px}
+.wrap{max-width:1100px;margin:0 auto}
+h1{color:#fff;font-size:18px;margin:0 0 12px}
+label{font-size:13px;color:var(--muted)}
+input,button,select{padding:8px;border-radius:8px;border:0;background:#081726;color:var(--muted);margin-right:6px}
+button{background:var(--accent);color:white;cursor:pointer}
+.card{background:var(--card);padding:12px;border-radius:10px;margin-top:10px}
+.row{display:flex;gap:12px;align-items:center}
+.col{flex:1}
+.zones{display:flex;gap:12px;margin-top:12px}
+.panel{flex:1;background:#081726;padding:12px;border-radius:8px;min-height:300px;overflow:auto}
+.zone{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03)}
+.support{color:#9fe8a6}
+.resist{color:#f6b28b}
+.muted{color:var(--muted)}
+.status{margin-top:8px}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>Hybrid Trend-Origin Detector — Fast Delta + Imbalance (Hybrid)</h1>
-    <div class="grid">
-      <div class="card">
-        <div>
-          <label>Exchanges (multi)</label><br>
-          <select id="exchanges" multiple style="height:140px;width:100%">
-            <option value="binance" selected>Binance (futures)</option>
-            <option value="binance-spot">Binance (spot)</option>
-            <option value="okx">OKX</option>
-            <option value="bybit">Bybit</option>
-            <!-- add more if server supports -->
-            <option value="all">All (DB)</option>
-          </select>
-        </div>
-
-        <div>
-          <label>Symbol</label><br>
-          <input id="symbol" placeholder="e.g. BTCUSDT" style="width:100%"/>
-          <div class="small">Known symbols:</div>
-          <select id="symbolsList" style="width:100%"></select>
-        </div>
-
-        <div style="display:flex;gap:8px">
-          <div style="flex:1">
-            <label>Range</label><br>
-            <select id="period" style="width:100%">
-              <option value="86400000">24h</option>
-              <option value="604800000">7d</option>
-              <option value="2592000000">30d</option>
-              <option value="7776000000">90d</option>
-              <option value="31536000000" selected>1y</option>
-            </select>
-          </div>
-          <div style="width:110px">
-            <label>Bucket</label><br>
-            <input id="bucket" value="1" style="width:100%"/>
-          </div>
-        </div>
-
-        <div>
-          <label>Render limit (UI)</label><br>
-          <input id="renderLimit" value="60" style="width:100%"/>
-        </div>
-
-        <div>
-          <label>Sort</label><br>
-          <select id="sort" style="width:100%">
-            <option value="delta_desc">Delta (abs desc)</option>
-            <option value="volume_desc">Volume (desc)</option>
-            <option value="price_asc">Price (asc)</option>
-          </select>
-        </div>
-
-        <div class="controls-row">
-          <button id="backfillBtn">Backfill 1 year</button>
-          <button id="fetchBtn">Fetch zones</button>
-          <button id="refreshSymbols">Refresh symbols</button>
-        </div>
-
-        <div id="jobBox" class="small muted" style="margin-top:12px"></div>
-        <div id="banner" style="margin-top:10px"></div>
-      </div>
-
-      <div class="card" id="mainCard">
-        <div id="summary" style="margin-bottom:8px"></div>
-        <div style="display:flex;gap:18px">
-          <div style="flex:1">
-            <div class="big" id="priceInfo"></div>
-            <div class="small muted" id="currentJob"></div>
-            <h3 style="color:#fff;margin-top:8px">Above current price (closest)</h3>
-            <div id="aboveList"></div>
-          </div>
-          <div style="flex:1">
-            <h3 style="color:#fff">Below current price (closest)</h3>
-            <div id="belowList"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-<script>
-const apiRoot = '';
-
-function showBanner(msg, type='error') {
-  const el = document.getElementById('banner');
-  if (!msg) { el.innerHTML = ''; return; }
-  el.innerHTML = `<div style="padding:8px;border-radius:8px;background:${type==='error'?'#4a1f1f':'#10321a'};color:${type==='error'?'#ffd6d6':'#b5f7c1'}">${escapeHtml(msg)}</div>`;
-}
-function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
-
-async function fetchJSON(url, opts) {
-  const r = await fetch(url, opts);
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`${r.status} ${r.statusText} — ${text}`);
-  }
-  return r.json();
-}
-
-async function loadSymbols(){
-  try {
-    const j = await fetchJSON('/api/symbols');
-    const sel = document.getElementById('symbolsList');
-    sel.innerHTML = '<option value="">-- choose --</option>' + (j.symbols||[]).map(s=>`<option value="${s.symbol}">${s.symbol}</option>`).join('');
-  } catch(e) {
-    console.warn(e);
-    showBanner('Failed to fetch symbols: ' + e.message);
-  }
-}
-loadSymbols();
-document.getElementById('refreshSymbols').addEventListener('click', loadSymbols);
-document.getElementById('symbolsList').addEventListener('change', ev => {
-  if (ev.target.value) document.getElementById('symbol').value = ev.target.value;
-});
-
-// helpers
-function getSelectedExchanges(){
-  const sel = document.getElementById('exchanges');
-  return Array.from(sel.selectedOptions).map(o => o.value);
-}
-
-let currentJobId = null;
-document.getElementById('backfillBtn').addEventListener('click', async ()=>{
-  showBanner('');
-  const symbol = (document.getElementById('symbol').value||'').trim().toUpperCase();
-  if (!symbol) { showBanner('Enter symbol'); return; }
-  const exs = getSelectedExchanges();
-  if (!exs.length) { showBanner('Select exchange(s)'); return; }
-
-  const body = { symbol, exchanges: exs.includes('all') ? exs.filter(x=>x!=='all') : exs, years: 1, bucketSize: Number(document.getElementById('bucket').value || 1) };
-  try {
-    const resp = await fetchJSON('/api/backfill', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    if (resp.ok && resp.jobs && resp.jobs.length) {
-      // show first job
-      currentJobId = resp.jobs[0];
-      document.getElementById('backfillBtn').innerText = 'Backfill running...';
-      pollJob(currentJobId);
-      document.getElementById('currentJob').innerText = `Job ${currentJobId} — ${symbol} — status: queued`;
-    } else {
-      showBanner('Backfill call failed');
-    }
-  } catch(e) {
-    showBanner('Backfill error: '+e.message);
-  }
-});
-
-async function pollJob(jobId) {
-  try {
-    let done=false;
-    while(!done) {
-      const j = await fetchJSON(`/api/backfill/status/${jobId}`);
-      const job = j.job;
-      document.getElementById('currentJob').innerText = `Job ${jobId} — ${job.symbol} / ${job.exchange} — status: ${job.status} — ${job.message||''}`;
-      if (job.status==='done' || job.status==='failed') {
-        document.getElementById('backfillBtn').innerText = 'Backfill 1 year';
-        done=true;
-        if (job.status==='done') showBanner('Backfill finished', 'success');
-        else showBanner('Backfill failed: ' + job.message);
-        break;
-      }
-      await new Promise(r => setTimeout(r, 3000));
-    }
-  } catch(e) {
-    console.warn('poll job error', e);
-    document.getElementById('backfillBtn').innerText = 'Backfill 1 year';
-    showBanner('Job polling error: ' + e.message);
-  }
-}
-
-document.getElementById('fetchBtn').addEventListener('click', async ()=>{
-  showBanner('');
-  const symbol = (document.getElementById('symbol').value||'').trim().toUpperCase();
-  if (!symbol) { showBanner('Enter symbol'); return; }
-  const exs = getSelectedExchanges();
-  const exParam = exs.includes('all') ? 'binance,okx,bybit' : exs.join(',');
-  const periodMs = Number(document.getElementById('period').value);
-  const bucket = Number(document.getElementById('bucket').value) || 1;
-  const renderLimit = Number(document.getElementById('renderLimit').value) || 60;
-  const sort = document.getElementById('sort').value || 'delta_desc';
-
-  try {
-    // current price
-    const pr = await fetchJSON(`/api/current-price?symbol=${encodeURIComponent(symbol)}`);
-    const current = Number(pr.price || 0);
-    document.getElementById('priceInfo').innerText = `Symbol: ${symbol} — current price: ${current}`;
-
-    // top zones
-    const q = new URLSearchParams({ symbol, exchanges: exParam, periodMs, bucket, limit: 1000, sort });
-    const zonesResp = await fetchJSON(`/api/top-zones?${q.toString()}`);
-    const zones = zonesResp.clusters || [];
-
-    // split to above/below nearest to current price and show only top nearest N by price distance but prefer large delta/volume
-    // We'll compute distance and filter
-    const withDist = zones.map(z => ({...z, dist: Math.abs(z.price - current)}));
-    // keep top by proximity but also ensure high delta: we pick top 300 closest first then sort by volume or delta to render
-    const near = withDist.sort((a,b)=> a.dist - b.dist).slice(0, 600); // backend can return many; take slice
-    // Now split above/below and sort each by price distance ascending
-    const above = near.filter(x=>x.price > current).sort((a,b)=> a.price - b.price).slice(0, Math.ceil(renderLimit/2));
-    const below = near.filter(x=>x.price < current).sort((a,b)=> b.price - a.price).slice(0, Math.ceil(renderLimit/2));
-
-    renderLists({symbol, current, above, below});
-  } catch(e) {
-    console.error(e);
-    showBanner('Fetch error: ' + e.message);
-  }
-});
-
-function formatVol(v) {
-  if (v === null || v === undefined) return '0';
-  if (v>=1e6) return (v/1e6).toFixed(2)+'M';
-  if (v>=1e3) return (v/1e3).toFixed(2)+'K';
-  return Number(v).toFixed(4);
-}
-
-function renderLists({symbol, current, above, below}) {
-  document.getElementById('aboveList').innerHTML = '';
-  document.getElementById('belowList').innerHTML = '';
-  if (!above.length) document.getElementById('aboveList').innerHTML = '<div class="muted">No clusters above current price</div>';
-  if (!below.length) document.getElementById('belowList').innerHTML = '<div class="muted">No clusters below current price</div>';
-  for (const z of above) {
-    const el = document.createElement('div'); el.className='cluster';
-    el.innerHTML = `<div class="left"><strong style="color:#fff">${z.price}</strong><div class="small muted">${z.lastTs?new Date(z.lastTs).toLocaleString():''}</div></div>
-                    <div style="text-align:right"><div class="green">Δ ${Number(z.delta).toFixed(4)}</div><div class="muted">vol ${formatVol(z.volume)}</div></div>`;
-    document.getElementById('aboveList').appendChild(el);
-  }
-  for (const z of below) {
-    const el = document.createElement('div'); el.className='cluster';
-    el.innerHTML = `<div class="left"><strong style="color:#fff">${z.price}</strong><div class="small muted">${z.lastTs?new Date(z.lastTs).toLocaleString():''}</div></div>
-                    <div style="text-align:right"><div class="red">Δ ${Number(z.delta).toFixed(4)}</div><div class="muted">vol ${formatVol(z.volume)}</div></div>`;
-    document.getElementById('belowList').appendChild(el);
-  }
-}
-
-</script>
-</body>
-</html>
+<div class="wrap">
+<h1>Delta Spike — Support/Resistance (Binance futures)</h1>
+<div
