@@ -1,35 +1,31 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Delta Spike S/R Levels</title>
+  <title>Delta Spike Levels (3 Months)</title>
 </head>
 <body>
-  <h2>Delta Spike Levels (3 Months)</h2>
 
-  <button onclick="fetchZones()">Fetch Zones</button>
+<h2>Delta Spike Levels (3 Months)</h2>
+<button onclick="fetchZones()">Fetch Zones</button>
 
-  <h3>Above Current Price</h3>
-  <pre id="above"></pre>
+<h3>Above Current Price</h3>
+<pre id="above"></pre>
 
-  <h3>Below Current Price</h3>
-  <pre id="below"></pre>
+<h3>Below Current Price</h3>
+<pre id="below"></pre>
 
 <script>
 async function fetchZones() {
-  try {
-    const res = await fetch("/api/zones?symbol=BTCUSDT");
-    const data = await res.json();
+  const res = await fetch("/api/zones?symbol=BTCUSDT");
+  const data = await res.json();
 
-    document.getElementById("above").textContent =
-      JSON.stringify(data.above, null, 2);
+  document.getElementById("above").textContent =
+    JSON.stringify(data.above, null, 2);
 
-    document.getElementById("below").textContent =
-      JSON.stringify(data.below, null, 2);
-
-  } catch (err) {
-    alert("Error fetching zones: " + err.message);
-  }
+  document.getElementById("below").textContent =
+    JSON.stringify(data.below, null, 2);
 }
 </script>
+
 </body>
 </html>
