@@ -10,7 +10,8 @@ const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 const Database = require('better-sqlite3');
-const pRetry = require('p-retry');
+const { default: pRetry } = require('p-retry');
+
 
 const app = express();
 app.use(cors());
