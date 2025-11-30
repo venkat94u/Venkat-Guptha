@@ -6,45 +6,101 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
 
   <style>
-    body{font-family:system-ui;background:#071229;color:#e6eef7;padding:18px}
-    .wrap{max-width:1000px;margin:auto}
-    .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
-    input,select,button{padding:8px;border-radius:6px;background:#0e2b42;color:white;border:1px solid #123}
-    button{background:#1f6fff;border:none}
-    .grid{display:flex;gap:15px}
-    .panel{flex:1;background:#0f2432;padding:12px;border-radius:8px}
-    .zone{display:flex;justify-content:space-between;padding:6px;border-bottom:1px solid rgba(255,255,255,0.06)}
-    .muted{color:#9fb0c8}
-    .small{font-size:12px}
+    body{
+      font-family:system-ui;
+      background:#071229;
+      color:#e6eef7;
+      padding:18px;
+    }
+    .wrap{
+      max-width:1000px;
+      margin:auto;
+    }
+    .controls{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-bottom:12px;
+    }
+    input,select,button{
+      padding:8px;
+      border-radius:6px;
+      background:#0e2b42;
+      color:white;
+      border:1px solid #123;
+      font-size:14px;
+    }
+    button{
+      background:#1f6fff;
+      border:none;
+      cursor:pointer;
+    }
+    .grid{
+      display:flex;
+      gap:15px;
+      margin-top:15px;
+    }
+    .panel{
+      flex:1;
+      background:#0f2432;
+      padding:12px;
+      border-radius:8px;
+      min-height:300px;
+    }
+    .zone{
+      display:flex;
+      justify-content:space-between;
+      padding:6px;
+      border-bottom:1px solid rgba(255,255,255,0.06);
+    }
+    .muted{
+      color:#9fb0c8;
+    }
+    .small{
+      font-size:12px;
+    }
   </style>
 </head>
-<body>
 
+<body>
 <div class="wrap">
+
   <h1>Delta Spike Support/Resistance</h1>
 
+  <!-- CONTROLS -->
   <div class="controls">
 
-    <!-- Symbol Dropdown -->
+    <!-- SYMBOL DROPDOWN -->
     <select id="symbolList" style="min-width:150px"></select>
 
-    <!-- Range Type -->
+    <!-- RANGE TYPE -->
     <select id="rangeType">
       <option value="percent">± Percent</option>
       <option value="points">± Points</option>
     </select>
 
-    <!-- Range Value -->
-    <input id="rangeValue" type="number" value="3" placeholder="Range Value" />
+    <!-- RANGE VALUE -->
+    <input id="rangeValue" type="number" value="3" title="Range value">
 
-    <!-- Minimum Gap -->
-    <input id="gap" type="number" value="35" placeholder="Gap" />
+    <!-- GAP -->
+    <input id="gap" type="number" value="35" title="Minimum gap">
 
+    <!-- SORT OPTIONS -->
+    <select id="levelSort">
+      <option value="strength">Strength (Default)</option>
+      <option value="asc">Price Ascending</option>
+      <option value="desc">Price Descending</option>
+    </select>
+
+    <!-- FETCH BUTTON -->
     <button id="fetchBtn">Fetch</button>
 
+    <!-- INFO -->
     <span id="status" class="small muted"></span>
+
   </div>
 
+  <!-- LEVELS GRID -->
   <div class="grid">
     <div class="panel">
       <div class="muted small">Above Price</div>
@@ -59,26 +115,39 @@
 
 </div>
 
+<!-- SCRIPT -->
 <script>
 const s = (id)=>document.getElementById(id);
 
-// Load Binance Symbols
+// ------------------------------------------
+// Load Binance Symbols Alphabetically (A→Z)
+// ------------------------------------------
 async function loadSymbols(){
   const r = await fetch("/api/symbols");
   const j = await r.json();
-  if (!j.ok){ alert("Failed to load symbols"); return; }
+  if (!j.ok){
+    alert("Failed to load symbols");
+    return;
+  }
 
-  s("symbolList").innerHTML = j.symbols
-    .map(sym => `<option value="${sym}">${sym}</option>`).join("");
+  const sorted = j.symbols.sort(); // alphabetical
+
+  s("symbolList").innerHTML = sorted
+    .map(sym => `<option value="${sym}">${sym}</option>`)
+    .join("");
 
   s("symbolList").value = "BTCUSDT";
 }
 
+// ------------------------------------------
+// Fetch Zones
+// ------------------------------------------
 async function fetchZones(){
   const symbol = s("symbolList").value;
   const rangeType = s("rangeType").value;
   const rangeValue = Number(s("rangeValue").value);
   const gap = Number(s("gap").value);
+  const sortType = s("levelSort").value;
 
   s("status").textContent = "Loading…";
 
@@ -92,16 +161,26 @@ async function fetchZones(){
 
   s("status").textContent = `Price ${j.currentPrice}`;
 
-  render("above", j.above);
-  render("below", j.below);
+  const sortLevels = (arr) => {
+    if (sortType === "asc") return arr.sort((a,b)=> a.price - b.price);
+    if (sortType === "desc") return arr.sort((a,b)=> b.price - a.price);
+    return arr; // default strength (already sorted)
+  };
+
+  render("above", sortLevels(j.above));
+  render("below", sortLevels(j.below));
 }
 
+// ------------------------------------------
+// Render Levels
+// ------------------------------------------
 function render(id, arr){
   const c = s(id);
   if (!arr.length){
     c.innerHTML = `<div class="muted small">No levels found</div>`;
     return;
   }
+
   c.innerHTML = arr.map(z => `
     <div class="zone">
       <div>
@@ -116,10 +195,11 @@ function render(id, arr){
   `).join("");
 }
 
-s("fetchBtn").addEventListener("click", fetchZones);
-
+// ------------------------------------------
+document.getElementById("fetchBtn").addEventListener("click", fetchZones);
 loadSymbols();
-</script>
+// ------------------------------------------
 
+</script>
 </body>
 </html>
