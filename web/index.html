@@ -1,24 +1,29 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Institutional Delta Spike Map</title>
-  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-
-  <style>
-    body { background:#0b0f16; color:white; font-family:sans-serif; }
-    #chart { height: 600px; }
-  </style>
+  <title>Delta Spike S/R</title>
 </head>
 <body>
+  <h2>Delta Spike Levels (3 Months)</h2>
+  <button onclick="fetchZones()">Fetch Zones</button>
 
-<h2>Institutional Delta Spike Map (3 Months)</h2>
-<button onclick="loadData()">Load Zones</button>
+  <h3>Above</h3>
+  <pre id="above"></pre>
 
-<div id="chart"></div>
+  <h3>Below</h3>
+  <pre id="below"></pre>
 
-<pre id="zones"></pre>
+<script>
+async function fetchZones() {
+  let res = await fetch("/api/zones?symbol=BTCUSDT");
+  let data = await res.json();
 
-<script src="chart.js"></script>
+  document.getElementById("above").textContent =
+    JSON.stringify(data.above, null, 2);
 
+  document.getElementById("below").textContent =
+    JSON.stringify(data.below, null, 2);
+}
+</script>
 </body>
 </html>
