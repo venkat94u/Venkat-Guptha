@@ -3,63 +3,251 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Volume Clusters MVP — Mobile</title>
+  <title>Volume Clusters — Aggregator</title>
   <style>
-    body{font-family:Inter,Arial,Helvetica;background:#071226;color:#e6f0fb;margin:0;padding:12px}
+    :root{--bg:#071226;--card:#0f2030;--accent:#0f6cff;--muted:#9fb0c8;color:#e6f0fb}
+    body{font-family:Inter,Arial,Helvetica;background:var(--bg);color:var(--muted);margin:0;padding:18px}
     .wrap{max-width:980px;margin:0 auto}
-    h1{font-size:18px;margin:4px 0 8px}
-    label{font-size:13px;color:#9fb0c8}
-    select,input{padding:8px;border-radius:8px;border:0;background:#081726;color:#e6f0fb;margin-right:6px}
-    button{padding:8px;border-radius:8px;border:0;background:#0f6cff;color:white;cursor:pointer}
-    .card{background:#0f2030;padding:10px;border-radius:10px;margin-top:10px}
-    .cluster{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03)}
-    .muted{color:#9fb0c8;font-size:12px}
+    h1{color:#fff;font-size:18px;margin:0 0 12px}
+    label{font-size:13px;color:var(--muted)}
+    select,input,button{padding:8px;border-radius:8px;border:0;background:#081726;color:var(--muted);margin-right:6px}
+    button{background:var(--accent);color:white;cursor:pointer}
+    .card{background:var(--card);padding:12px;border-radius:10px;margin-top:10px}
+    .cluster{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03);color:#e6f0fb}
+    .muted{color:var(--muted);font-size:12px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    .error{background:#4a1f1f;color:#ffd6d6;padding:8px;border-radius:8px;margin-bottom:8px}
+    .success{background:#10321a;color:#b5f7c1;padding:8px;border-radius:8px;margin-bottom:8px}
+    .small{font-size:12px;color:var(--muted)}
+    .left{flex:1}
   </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Volume Clusters — MVP (Mobile)</h1>
+  <h1>Volume Clusters — Aggregator (Binance / OKX / Bybit)</h1>
+
+  <div id="banner"></div>
+
   <div class="card">
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <div>
-        <label>Exchange</label><br>
-        <select id="exchange">
-          <option value="binance">Binance</option>
+    <div class="row">
+      <div style="min-width:160px">
+        <label>Exchange(s)</label><br>
+        <select id="exchanges" multiple style="min-width:160px;height:100px">
+          <option value="binance" selected>Binance (futures)</option>
+          <option value="binance-spot">Binance (spot)</option>
           <option value="okx">OKX</option>
           <option value="bybit">Bybit</option>
+          <option value="kucoin">KuCoin</option>
+          <option value="bitget">Bitget</option>
+          <option value="gate">Gate.io</option>
+          <option value="huobi">Huobi / HTX</option>
+          <option value="all">All (DB)</option>
+        </select>
+
+      </div>
+
+      <div class="left">
+        <label>Symbol</label><br>
+        <input id="symbol" placeholder="e.g. BTCUSDT or choose from dropdown" style="width:100%" />
+        <div style="margin-top:6px">
+          <label class="small">Known symbols from DB:</label>
+          <select id="symbolsList" style="width:100%;margin-top:4px"></select>
+        </div>
+      </div>
+
+      <div style="min-width:160px">
+        <label>Time range</label><br>
+        <select id="period">
+          <option value="86400000">24h</option>
+          <option value="604800000">7d</option>
+          <option value="2592000000">30d</option>
+          <option value="7776000000">90d</option>
+          <option value="31536000000" selected>1y</option>
         </select>
       </div>
-      <div>
-        <label>Symbol</label><br>
-        <input id="symbol" value="BTCUSDT" />
-      </div>
-      <div style="align-self:end">
-        <button id="fetchBtn">Fetch Top Clusters</button>
+
+      <div style="min-width:180px">
+        <label>Display (above / below)</label><br>
+        <input id="above" type="number" value="30" style="width:72px"/> <input id="below" type="number" value="30" style="width:72px"/>
       </div>
     </div>
-    <div id="clusters" style="margin-top:10px"></div>
+
+    <div style="margin-top:10px" class="row">
+      <button id="backfillBtn">Backfill 1 year (selected exchanges)</button>
+      <button id="fetchBtn">Fetch Top Clusters</button>
+      <button id="refreshSymbols">Refresh Symbols</button>
+      <label style="align-self:center" class="small">Bucket size</label>
+      <input id="bucket" value="1" style="width:80px"/>
+      <label style="align-self:center" class="small">Render limit</label>
+      <input id="renderLimit" value="60" style="width:80px"/>
+      <select id="sort">
+        <option value="volume_desc">Volume (desc)</option>
+        <option value="price_asc">Price (asc)</option>
+        <option value="price_desc">Price (desc)</option>
+      </select>
+    </div>
+
+    <div style="margin-top:10px" id="progress"></div>
+
+    <div id="clusters" style="margin-top:10px;color:#e6f0fb"></div>
   </div>
 </div>
+
 <script>
-  const fetchBtn = document.getElementById('fetchBtn');
-  const clustersEl = document.getElementById('clusters');
-  fetchBtn.addEventListener('click', async ()=>{
-    clustersEl.innerHTML = '<div class="muted">loading…</div>';
-    const exchange = document.getElementById('exchange').value;
-    const symbol = document.getElementById('symbol').value.trim();
-    const res = await fetch(`/api/top-clusters?symbol=${symbol}&exchange=${exchange}&limit=50&periodMs=${24*3600*1000}&bucket=1`);
-    const j = await res.json();
-    if(!j.clusters || !j.clusters.length){
-      clustersEl.innerHTML = '<div class="muted">no clusters (run backfill first)</div>';
-      return;
+  const apiRoot = '';
+
+  function showBanner(msg, type='error') {
+    const b = document.getElementById('banner');
+    if (!msg) { b.innerHTML = ''; return; }
+    if (type === 'error') b.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+    else b.innerHTML = `<div class="success">${escapeHtml(msg)}</div>`;
+  }
+  function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+  async function fetchJSON(url, opts={}) {
+    try {
+      const r = await fetch(url, opts);
+      if (!r.ok) {
+        let text = await r.text();
+        throw new Error(`${r.status} ${r.statusText} — ${text}`);
+      }
+      return await r.json();
+    } catch (e) {
+      throw e;
     }
-    clustersEl.innerHTML = j.clusters.map(c=>`
-      <div class="cluster">
-        <div><strong>${c.price}</strong> — vol ${c.volume.toFixed(4)}</div>
-        <div class="muted">last @ ${new Date(c.lastTs).toLocaleString()}</div>
-      </div>
-    `).join('');
+  }
+
+  async function loadSymbols() {
+    try {
+      const j = await fetchJSON('/api/symbols');
+      const sel = document.getElementById('symbolsList');
+      sel.innerHTML = '<option value="">-- choose --</option>' + (j.symbols || []).map(s=>`<option value="${s.symbol}">${s.symbol} — ${new Date(s.lastSeen).toLocaleString()}</option>`).join('');
+    } catch (e) {
+      console.warn('loadSymbols error', e);
+      showBanner('Failed to load known symbols: ' + e.message);
+    }
+  }
+
+  // load symbols on start
+  loadSymbols();
+
+  document.getElementById('refreshSymbols').addEventListener('click', loadSymbols);
+
+  // click on symbolsList populates symbol input
+  document.getElementById('symbolsList').addEventListener('change', (ev)=>{
+    if(ev.target.value) document.getElementById('symbol').value = ev.target.value;
   });
+
+  async function getSelectedExchanges() {
+    const sel = document.getElementById('exchanges');
+    return Array.from(sel.selectedOptions).map(o=>o.value);
+  }
+
+  // backfill button: POST /api/backfill, then poll job status
+  document.getElementById('backfillBtn').addEventListener('click', async ()=>{
+    showBanner('', 'success');
+    const symbol = (document.getElementById('symbol').value || '').trim().toUpperCase();
+    if (!symbol) { showBanner('Enter a symbol (e.g. BTCUSDT)'); return; }
+    const exs = await getSelectedExchanges();
+    if (!exs.length) { showBanner('Select at least one exchange'); return; }
+
+    // normalize 'all' -> send all known exchanges (server supports array)
+    const body = { symbol, exchanges: exs, years: 1 };
+    try {
+      document.getElementById('progress').innerText = 'Starting backfill job...';
+      const result = await fetchJSON('/api/backfill', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      if (!result.ok) {
+        showBanner('Backfill failed to start: ' + JSON.stringify(result));
+        return;
+      }
+      showBanner('Backfill started: ' + result.jobs.join(', '), 'success');
+      // poll each job
+      for (const jobId of result.jobs) {
+        pollJob(jobId);
+      }
+    } catch (e) {
+      console.error('backfill start error', e);
+      showBanner('Failed to start backfill: ' + e.message);
+    }
+  });
+
+  async function pollJob(jobId) {
+    const el = document.getElementById('progress');
+    el.innerText = `Polling job ${jobId}...`;
+    try {
+      const interval = 3000;
+      let done = false;
+      while (!done) {
+        const j = await fetchJSON(`/api/backfill/status/${jobId}`);
+        const job = j.job;
+        el.innerHTML = `<div class="small">Job ${jobId} — ${job.symbol} / ${job.exchange} — status: ${job.status} — updated: ${new Date(job.updated_at||0).toLocaleString()} ${job.message ? ' — ' + job.message : ''}</div>`;
+        if (job.status === 'done') { done = true; showBanner(`Backfill job ${jobId} completed`, 'success'); break; }
+        if (job.status === 'failed') { done = true; showBanner(`Backfill job ${jobId} failed: ${job.message}`); break; }
+        await new Promise(r=>setTimeout(r, interval));
+      }
+    } catch (e) {
+      console.error('pollJob error', e);
+      showBanner('Error polling backfill job: ' + e.message);
+    }
+  }
+
+  // fetch clusters (smart split above/below)
+  document.getElementById('fetchBtn').addEventListener('click', async ()=>{
+    showBanner('');
+    const symbol = (document.getElementById('symbol').value || '').trim().toUpperCase();
+    if (!symbol) { showBanner('Enter/select symbol'); return; }
+    const exs = await getSelectedExchanges();
+    if (!exs.length) { showBanner('Select at least one exchange'); return; }
+    const periodMs = Number(document.getElementById('period').value);
+    const bucket = Number(document.getElementById('bucket').value) || 1;
+    const renderLimit = Number(document.getElementById('renderLimit').value) || 60;
+    const sort = document.getElementById('sort').value || 'volume_desc';
+    try {
+      document.getElementById('clusters').innerHTML = '<div class="muted">loading clusters…</div>';
+      const priceResp = await fetchJSON(`/api/current-price?symbol=${symbol}`);
+      const currentPrice = Number(priceResp.price);
+      // request exchanges param as comma-separated
+      const q = new URLSearchParams({
+        symbol,
+        exchanges: exs.join(','),
+        periodMs,
+        bucket,
+        limit: 1000,
+        sort
+      });
+      const data = await fetchJSON(`/api/top-clusters?${q.toString()}`);
+      const clusters = data.clusters || [];
+      // split above/below
+      const aboveN = Number(document.getElementById('above').value) || 30;
+      const belowN = Number(document.getElementById('below').value) || 30;
+      const above = clusters.filter(c=>c.price > currentPrice).sort((a,b)=>a.price - b.price).slice(0, aboveN);
+      const below = clusters.filter(c=>c.price < currentPrice).sort((a,b)=>b.price - a.price).slice(0, belowN);
+
+      renderClusters({ symbol, currentPrice, above, below, renderLimit });
+    } catch (e) {
+      console.error('fetch clusters error', e);
+      showBanner('Failed to fetch clusters: ' + e.message);
+      document.getElementById('clusters').innerHTML = '';
+    }
+  });
+
+  function renderClusters({ symbol, currentPrice, above, below }) {
+    const out = [];
+    out.push(`<div class="muted">Symbol: ${symbol} — current price: <strong style="color:#fff">${currentPrice}</strong></div>`);
+    out.push('<h3 style="color:#fff">Above current price</h3>');
+    if (!above.length) out.push(`<div class="muted">no clusters above current price</div>`);
+    else out.push(above.map(c => `<div class="cluster"><strong>${c.price}</strong> — vol ${Number(c.volume).toFixed(4)} <div class="muted">last @ ${new Date(c.lastTs||0).toLocaleString()}</div></div>`).join(''));
+
+    out.push('<h3 style="color:#fff;margin-top:8px">Below current price</h3>');
+    if (!below.length) out.push(`<div class="muted">no clusters below current price</div>`);
+    else out.push(below.map(c => `<div class="cluster"><strong>${c.price}</strong> — vol ${Number(c.volume).toFixed(4)} <div class="muted">last @ ${new Date(c.lastTs||0).toLocaleString()}</div></div>`).join(''));
+
+    document.getElementById('clusters').innerHTML = out.join('');
+  }
+
+  // convenience: load known symbols on start
+  loadSymbols();
+
 </script>
 </body>
 </html>
